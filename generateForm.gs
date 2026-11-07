@@ -554,6 +554,85 @@ function buildFormItems(form, schedule, masterSpreadsheet) {
       .setChoices(matchupList.map(m => item.createChoice(m)));
 }
 
+// Submits an automatic entry for "Vegas Line" to the given form.
+//
+// Picks, for every game, the team favored by the odds (the schedule's
+// "Favorites" row). If there is no clear favorite - no odds were found, or
+// the probabilities are exactly even - the home team is picked, matching
+// how getEspnSchedule() already breaks ties. The Weekly Double goes on the
+// game with the highest favorite win probability (earliest game wins a
+// tie), and the tiebreaker guess is the oddsmakers' expected total points
+// for the last game.
+//
+// `schedule` is the same transposed array passed to generateForm():
+//   schedule[0] titles, [1] favorites, [2] favorite probs,
+//   [3] away teams,     [4] home teams
+function submitVegasLineResponse_(form, schedule) {
+  var VEGAS_NAME = "Vegas Line";
+  var DEFAULT_TIEBREAKER = "39.5";
+
+  var titles = schedule[0];
+  var favorites = schedule[1];
+  var probs = schedule[2];
+  var awayTeams = schedule[3];
+  var homeTeams = schedule[4];
+
+  // Work out the pick for each real matchup column, keyed by question title.
+  var pickByTitle = {};
+  var doubleTitle = null;
+  var bestProb = -1;
+
+  for (var i = 1; i < titles.length; i++) {
+    if (awayTeams[i] === "-" || homeTeams[i] === "-") continue;
+
+    // Away only if it is strictly favored. A missing-odds default
+    // ("Team (Away)") or an even game falls through to the home team.
+    var pickAway = favorites[i] === awayTeams[i];
+    pickByTitle[titles[i]] = pickAway
+      ? awayTeams[i] + " (Away)"
+      : homeTeams[i] + " (Home)";
+
+    var prob = parseFloat(probs[i]); // e.g. "63.2% (Source: ...)" -> 63.2
+    if (!isNaN(prob) && prob > bestProb) {
+      bestProb = prob;
+      doubleTitle = titles[i] + " " + awayTeams[i] + " @ " + homeTeams[i];
+    }
+  }
+
+  // Tiebreaker: the expected total (may carry a "(Source: ...)" suffix).
+  var expectedTotal = parseFloat(favorites[favorites.length - 1]);
+  var tiebreakerGuess = isNaN(expectedTotal) ? DEFAULT_TIEBREAKER : String(expectedTotal);
+
+  var response = form.createResponse();
+
+  form.getItems().forEach(function(item) {
+    var type = item.getType();
+    var title = item.getTitle();
+
+    if (type === FormApp.ItemType.TEXT) {
+      var text = item.asTextItem();
+      if (title === "What is your name?") {
+        response.withItemResponse(text.createResponse(VEGAS_NAME));
+      } else {
+        response.withItemResponse(text.createResponse(tiebreakerGuess));
+      }
+    } else if (type === FormApp.ItemType.MULTIPLE_CHOICE) {
+      var mc = item.asMultipleChoiceItem();
+      if (title === "Weekly Double") {
+        if (doubleTitle) {
+          response.withItemResponse(mc.createResponse(doubleTitle));
+        }
+      } else if (title in pickByTitle) {
+        response.withItemResponse(mc.createResponse(pickByTitle[title]));
+      }
+    }
+  });
+
+  response.submit();
+  Logger.log("Submitted '" + VEGAS_NAME + "' entry (Weekly Double: " + doubleTitle +
+             ", tiebreaker: " + tiebreakerGuess + ").");
+}
+
 // PREVIEW MODE: builds the exact same questions/images onto a brand-new,
 // throwaway Form. Does NOT touch MASTER_FORM_ID, does NOT write to the
 // "Game Results" sheet, and does NOT relink/rename any spreadsheet tabs.
@@ -615,4 +694,8 @@ function generateForm(schedule) {
     var cleanedResponseSheet = masterSpreadsheet.getSheetByName("Responses Cleaned");
     cleanedResponseSheet.getRange("A24").setValue("=ARRAYFORMULA(LET(\n  swapped, HSTACK('" + finalTabName + "'!B:B, '" + finalTabName + "'!A:A, '" + finalTabName + "'!C:T),\n  IFERROR(REGEXREPLACE(swapped, " + '" \\(Away\\)| \\(Home\\)| \\(.*\\).*\\@.*", ""), swapped)\n))');
   }
+
+  // Auto-submit the "Vegas Line" entry now that the form is linked to the sheet
+  submitVegasLineResponse_(masterForm, schedule);
+  SpreadsheetApp.flush();
 }
